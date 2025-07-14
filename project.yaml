@@ -1,9 +1,9 @@
-homepage: https://openwrt.org/docs/techref/netifd
+homepage: https://openwrt.org/docs/techref/relayd
 language: c
 primary_contact: steven@midlink.org
 auto_ccs:
   - dedeckeh@gmail.com
-main_repo: https://github.com/Dudcom/netifd-oss-fuzz.git
+main_repo: https://github.com/Dudcom/relayd-oss-fuzz.git
 sanitizers:
   - address
   - undefined
