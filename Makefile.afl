@@ -1,0 +1,123 @@
+#!/usr/bin/make -f
+
+# AFL++ Makefile for relayd fuzz target (relayd-fuzz)
+# Follows the pattern used for the other fuzzers in this repository.
+
+# -----------------------------------------------------------------------------
+# 1. Compiler
+# -----------------------------------------------------------------------------
+CC := afl-clang-lto
+
+# -----------------------------------------------------------------------------
+# 2. Paths & flags
+# -----------------------------------------------------------------------------
+DEPS_DIR := $(abspath $(CURDIR)/deps)
+INSTALL_PREFIX := $(DEPS_DIR)/install
+CFLAGS_BASE := -O2 -fPIC -std=gnu99 -g -Wall -Wno-c23-extensions -D_GNU_SOURCE -D__AFL_COMPILER
+CFLAGS := $(CFLAGS_BASE) -I$(INSTALL_PREFIX)/include -I$(CURDIR)
+LDFLAGS := -L$(INSTALL_PREFIX)/lib
+
+# -----------------------------------------------------------------------------
+# 3. Sources
+# -----------------------------------------------------------------------------
+CORE_SRC := dhcp.c route.c main_for_fuzz.c
+FUZZER_SRC := relayd-fuzz.c
+
+OBJ_DIR := obj
+CORE_OBJ := $(CORE_SRC:%.c=$(OBJ_DIR)/%.o)
+FUZZER_OBJ := $(OBJ_DIR)/fuzzer.o
+
+FUZZER_BIN := relayd_afl_fuzzer
+
+# -----------------------------------------------------------------------------
+# 4. Top-level targets
+# -----------------------------------------------------------------------------
+.PHONY: all deps clean distclean help
+all: deps $(FUZZER_BIN)
+
+# -----------------------------------------------------------------------------
+# 5. Dependencies (libubox)
+# -----------------------------------------------------------------------------
+DEPS_LIBS := $(INSTALL_PREFIX)/lib/libubox.a
+
+deps: $(DEPS_LIBS)
+	@echo "✓ Dependencies built"
+
+$(INSTALL_PREFIX)/lib/libubox.a:
+	@echo "[libubox] building"
+	@mkdir -p $(DEPS_DIR)
+	@if [ ! -d "$(DEPS_DIR)/libubox" ]; then \
+		cd $(DEPS_DIR) && git clone --depth 1 https://github.com/openwrt/libubox.git; \
+	fi
+	@cd $(DEPS_DIR)/libubox && rm -rf tests examples lua || true
+	@cd $(DEPS_DIR)/libubox && sed -i '/[Aa][Dd][Dd]_SUBDIRECTORY.*examples/d' CMakeLists.txt || true
+	@cd $(DEPS_DIR)/libubox && sed -i '/[Aa][Dd][Dd]_SUBDIRECTORY.*lua/d' CMakeLists.txt || true
+	@cd $(DEPS_DIR)/libubox && mkdir -p build && cd build && \
+		cmake .. -DCMAKE_INSTALL_PREFIX="$(INSTALL_PREFIX)" -DCMAKE_C_COMPILER="$(CC)" \
+		      -DCMAKE_C_FLAGS="-O2 -fPIC -g" -DBUILD_STATIC=ON -DBUILD_SHARED_LIBS=OFF \
+		      -DBUILD_LUA=OFF -DBUILD_EXAMPLES=OFF -DBUILD_TESTS=OFF && make -j$$(nproc) && make install
+
+# -----------------------------------------------------------------------------
+# 6. Generate main_for_fuzz.c (strips main() and duplicate globals)
+# -----------------------------------------------------------------------------
+MAIN_SRC := main.c
+MAIN_FOR_FUZZ := main_for_fuzz.c
+
+$(MAIN_FOR_FUZZ): $(MAIN_SRC)
+	@echo "[relayd] Generating $@ from $<"
+	@echo '// Auto-generated stub from main.c for fuzzing' > $@
+	@echo '#include <stdint.h>' >> $@
+	@echo '#include <stdbool.h>' >> $@
+	@echo '#include <libubox/list.h>' >> $@
+	@echo '' >> $@
+	@echo 'extern struct list_head interfaces;' >> $@
+	@echo 'extern int debug;' >> $@
+	@echo 'extern uint8_t local_addr[4];' >> $@
+	@echo 'extern int local_route_table;' >> $@
+	@echo '' >> $@
+	@echo 'static int host_timeout = 30;' >> $@
+	@echo 'static int host_ping_tries = 5;' >> $@
+	@echo 'static int inet_sock = -1;' >> $@
+	@echo 'static int forward_bcast = 1;' >> $@
+	@echo 'static int forward_dhcp = 1;' >> $@
+	@echo 'static int parse_dhcp = 1;' >> $@
+	@echo 'static LIST_HEAD(pending_routes);' >> $@
+	@echo '' >> $@
+	@sed -e '/^int main(/,/^}[[:space:]]*$$/d' \
+	     -e '/^LIST_HEAD(interfaces);/d' \
+	     -e '/^int debug;/d' \
+	     -e '/^uint8_t local_addr\\[4\\];/d' \
+	     -e '/^int local_route_table;/d' \
+	     -e '/^static LIST_HEAD(pending_routes);/d' \
+	     $< >> $@
+
+# -----------------------------------------------------------------------------
+# 7. Compilation rules
+# -----------------------------------------------------------------------------
+$(OBJ_DIR):
+	mkdir -p $(OBJ_DIR)
+
+$(OBJ_DIR)/%.o: %.c | $(OBJ_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(FUZZER_OBJ): $(FUZZER_SRC) deps | $(OBJ_DIR)
+	$(CC) $(CFLAGS) -Wno-error=implicit-function-declaration -c $< -o $@
+
+# -----------------------------------------------------------------------------
+# 8. Linking
+# -----------------------------------------------------------------------------
+$(FUZZER_BIN): $(CORE_OBJ) $(FUZZER_OBJ)
+	$(CC) $(CFLAGS) $(CORE_OBJ) $(FUZZER_OBJ) $(LDFLAGS) -lubox -pthread -lrt -o $@
+	@echo "✓ Built: $@"
+
+# -----------------------------------------------------------------------------
+# 9. Convenience
+# -----------------------------------------------------------------------------
+clean:
+	rm -rf $(OBJ_DIR) $(FUZZER_BIN) $(MAIN_FOR_FUZZ)
+
+distclean: clean
+	rm -rf $(DEPS_DIR)
+
+help:
+	@echo "AFL++ relayd fuzzer Makefile" 
