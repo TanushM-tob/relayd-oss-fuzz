@@ -36,6 +36,7 @@ static int forward_dhcp = 1;
 static int parse_dhcp = 1;
 
 static bool fuzz_initialized = false;
+static bool mock_rif_in_list = false;
 
 #define FUZZ_DEBUG(fmt, ...)
 
@@ -55,15 +56,50 @@ static struct relayd_interface mock_rif = {
     .rt_table = 100,
 };
 
+static void cleanup_fuzzing_state(void) {
+    struct relayd_host *host, *host_tmp;
+    
+    // Clean up all hosts from mock_rif
+    list_for_each_entry_safe(host, host_tmp, &mock_rif.hosts, list) {
+        // Remove from list and free memory
+        list_del(&host->list);
+        
+        // Free any routes
+        struct relayd_route *route, *route_tmp;
+        list_for_each_entry_safe(route, route_tmp, &host->routes, list) {
+            list_del(&route->list);
+            free(route);
+        }
+        
+        free(host);
+    }
+    
+    // Remove mock_rif from interfaces list if it was added
+    if (mock_rif_in_list) {
+        list_del(&mock_rif.list);
+        mock_rif_in_list = false;
+    }
+    
+    // Close socket if open
+    if (inet_sock >= 0) {
+        close(inet_sock);
+        inet_sock = -1;
+    }
+    
+    // Reset interface lists
+    INIT_LIST_HEAD(&mock_rif.hosts);
+    INIT_LIST_HEAD(&mock_rif.list);
+    
+    // Reset global interfaces list
+    INIT_LIST_HEAD(&interfaces);
+}
+
 static void init_fuzzing_environment(void) {
-    if (fuzz_initialized) {
-        return;
-    }
+    // Clean up any previous state first
+    cleanup_fuzzing_state();
     
-    if (interfaces.next == NULL || interfaces.prev == NULL) {
-        INIT_LIST_HEAD(&interfaces);
-    }
-    
+    // Initialize fresh state
+    INIT_LIST_HEAD(&interfaces);
     INIT_LIST_HEAD(&mock_rif.list);
     INIT_LIST_HEAD(&mock_rif.hosts);
     
@@ -75,7 +111,7 @@ static void init_fuzzing_environment(void) {
     }
     
     debug = 1;
-    
+    mock_rif_in_list = false;
     fuzz_initialized = true;
 }
 
@@ -134,8 +170,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     
     init_fuzzing_environment();
     
-    if (list_empty(&interfaces)) {
+    // Add mock_rif to interfaces only if not already there
+    if (!mock_rif_in_list) {
         list_add(&mock_rif.list, &interfaces);
+        mock_rif_in_list = true;
     }
     
     uint8_t fuzz_type = data[0] % 4;
@@ -160,44 +198,47 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
             break;
     }
     
+    // Clean up state after each iteration to ensure determinism
+    cleanup_fuzzing_state();
+    
     return 0;
 }
 
 
 
 
-// #ifndef __AFL_FUZZ_TESTCASE_LEN
+#ifndef __AFL_FUZZ_TESTCASE_LEN
 
-// ssize_t fuzz_len;
-// unsigned char fuzz_buf[1024000];
+ssize_t fuzz_len;
+unsigned char fuzz_buf[1024000];
 
-// #define __AFL_FUZZ_TESTCASE_LEN fuzz_len
-// #define __AFL_FUZZ_TESTCASE_BUF fuzz_buf  
-// #define __AFL_FUZZ_INIT() void sync(void);
-// #define __AFL_LOOP(x) \
-//     ((fuzz_len = read(0, fuzz_buf, sizeof(fuzz_buf))) > 0 ? 1 : 0)
-// #define __AFL_INIT() sync()
+#define __AFL_FUZZ_TESTCASE_LEN fuzz_len
+#define __AFL_FUZZ_TESTCASE_BUF fuzz_buf  
+#define __AFL_FUZZ_INIT() void sync(void);
+#define __AFL_LOOP(x) \
+    ((fuzz_len = read(0, fuzz_buf, sizeof(fuzz_buf))) > 0 ? 1 : 0)
+#define __AFL_INIT() sync()
 
-// #endif
+#endif
 
-// __AFL_FUZZ_INIT();
+__AFL_FUZZ_INIT();
 
-// #pragma clang optimize off
-// #pragma GCC optimize("O0")
+#pragma clang optimize off
+#pragma GCC optimize("O0")
 
-// int main(int argc, char **argv)
-// {
-//     (void)argc; (void)argv; 
+int main(int argc, char **argv)
+{
+    (void)argc; (void)argv; 
     
-//     ssize_t len;
-//     unsigned char *buf;
+    ssize_t len;
+    unsigned char *buf;
 
-//     __AFL_INIT();
-//     buf = __AFL_FUZZ_TESTCASE_BUF;
-//     while (__AFL_LOOP(INT_MAX)) {
-//         len = __AFL_FUZZ_TESTCASE_LEN;
-//         LLVMFuzzerTestOneInput(buf, (size_t)len);
-//     }
+    __AFL_INIT();
+    buf = __AFL_FUZZ_TESTCASE_BUF;
+    while (__AFL_LOOP(INT_MAX)) {
+        len = __AFL_FUZZ_TESTCASE_LEN;
+        LLVMFuzzerTestOneInput(buf, (size_t)len);
+    }
     
-//     return 0;
-// }
+    return 0;
+}
